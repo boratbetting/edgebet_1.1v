@@ -110,7 +110,8 @@ def run(raw_dir="data/raw",out_dir="data/results",cfg_path="configs/params_v1.ya
     print(f"    M:{mr['input_count']}->{mr['output_count']} P:{pr['input_count']}->{pr['output_count']}")
 
     print("\n[2] Positions...")
-    pos_table=build_position_table(cp)
+    league_code=config.get("league","FR_LAF_W")
+    pos_table=build_position_table(cp, league=league_code)
     pmap={p["player_name"]:p["position_inferred"] for p in pos_table}
     overrides_path=os.path.join(os.path.dirname(cfg_path),"position_overrides.yaml")
     overrides={}

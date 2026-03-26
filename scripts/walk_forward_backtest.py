@@ -1,11 +1,11 @@
 
 import sys
-sys.path.insert(0, "/content/betedge")
+sys.path.insert(0, "/content/betedge_lam")
 import pandas as pd
 import numpy as np
 import yaml
 
-BASE        = "/content/betedge"
+BASE        = "/content/betedge_lam"
 DATA_RAW    = f"{BASE}/data/raw"
 DATA_RES    = f"{BASE}/data/results"
 CONFIG_PATH = f"{BASE}/configs/params_v1.yaml"
