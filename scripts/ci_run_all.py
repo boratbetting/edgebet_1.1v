@@ -50,9 +50,13 @@ def run_pipeline_liga(liga):
         print(f"  {liga}: brak players_raw.csv — pomijam")
         return None
 
+    matches_path = f"{input_dir}/matches_with_odds.csv"
+    if not os.path.exists(matches_path):
+        matches_path = f"{input_dir}/matches.csv"
     result = subprocess.run(
         [sys.executable, "scripts/run_pipeline_v3.py",
-         "--input", input_dir, "--output", output_dir],
+         "--input", input_dir, "--output", output_dir,
+         "--matches", matches_path],
         capture_output=True, text=True, timeout=120
     )
 
