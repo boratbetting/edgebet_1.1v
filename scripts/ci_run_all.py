@@ -1,5 +1,8 @@
-"""ci_run_all.py — run pipeline per league + dodaj formę + generuj team_profiles.json."""
-import os, sys, json, csv, subprocess, requests
+"""
+ci_run_all.py — generuj team_profiles.json bez run_pipeline_v3.py
+Używa tego samego kodu co colab_export_profiles.py (działa w Colabie).
+"""
+import os, sys, json, csv, requests
 from collections import defaultdict
 
 TOKEN  = os.environ.get("TOKEN", "")
@@ -9,6 +12,103 @@ LEAGUES = ["fr_laf_w","fr_lam","de_bl_w","de_bl_m",
            "be_lvl_w","be_lvl_m","fi_ml_w","fi_ml_m","ro_a1_w","ro_a1_m"]
 
 ROLE_WEIGHTS = {"S":1.25,"OPP":1.20,"OH":1.10,"MB":1.00,"L":0.90,"UNKNOWN":1.00}
+
+# ── POSITION INFERENCE ────────────────────────────────────────
+
+def infer_position(att, blk, srv, rec, pts):
+    if pts < 1.0 and rec > 2.0: return "L"
+    if srv > 0.8 and att < 3.0 and blk < 0.8: return "S"
+    if att > 3.0 and rec < 1.5 and blk < 1.5: return "OPP"
+    if blk > 0.5 and rec < 2.0: return "MB"
+    if att > 1.0 and rec > 0.5: return "OH"
+    if att > 1.5: return "OPP"
+    if blk > 0.3: return "MB"
+    if pts > 1.0: return "OH"
+    return "UNKNOWN"
+
+def compute_pis(att, srv_ace, blk, att_err, srv_err, rec_pos):
+    err = att_err + srv_err
+    return max(round(att + srv_ace*1.5 + blk*1.2 - err*0.5 + rec_pos*0.3, 2), 0.0)
+
+# ── BUILD PROFILES FROM players_raw.csv ──────────────────────
+
+def build_profiles_from_csv(liga):
+    path = f"data/{liga}/players_raw.csv"
+    if not os.path.exists(path):
+        print(f"  {liga}: brak players_raw.csv")
+        return {}
+
+    rows = list(csv.DictReader(open(path, encoding="utf-8-sig")))
+    if not rows:
+        return {}
+
+    # Grupuj per (team, player)
+    player_stats = defaultdict(lambda: defaultdict(float))
+    player_games  = defaultdict(set)
+    player_number = {}
+
+    for row in rows:
+        team   = row.get("team_name","").strip()
+        player = row.get("player_name","").strip()
+        mid    = row.get("match_id","").strip()
+        if not team or not player: continue
+
+        key = (team, player)
+        player_number[key] = row.get("player_no","")
+
+        def g(col): 
+            try: return float(row.get(col,0) or 0)
+            except: return 0.0
+
+        player_stats[key]["att_pts"]  += g("att_pts")
+        player_stats[key]["srv_ace"]  += g("srv_ace")
+        player_stats[key]["blocks"]   += g("blocks")
+        player_stats[key]["att_err"]  += g("att_err")
+        player_stats[key]["srv_err"]  += g("srv_err")
+        player_stats[key]["rec_pos"]  += g("rec_pos")
+        player_stats[key]["total_pts"]+= g("total_pts")
+        if mid: player_games[key].add(mid)
+
+    # Per drużyna → roster
+    teams = defaultdict(dict)
+    for (team, player), stats in player_stats.items():
+        games = max(len(player_games[(team,player)]), 1)
+        att   = stats["att_pts"]  / games
+        srv   = stats["srv_ace"]  / games
+        blk   = stats["blocks"]   / games
+        aerr  = stats["att_err"]  / games
+        serr  = stats["srv_err"]  / games
+        rec   = stats["rec_pos"]  / games
+        pts   = stats["total_pts"]/ games
+
+        pos = infer_position(att, blk, srv, rec, pts)
+        pis = compute_pis(att, srv, blk, aerr, serr, rec)
+
+        try: num = int(float(player_number[(team,player)]))
+        except: num = None
+
+        teams[team][player] = {
+            "number":      num,
+            "position":    pos,
+            "pis_rolling": pis,
+            "role_weight": ROLE_WEIGHTS.get(pos, 1.0),
+            "games_played": games,
+            "start_rate":  1.0,
+        }
+
+    # Oblicz TIS + ogranicz do top 7 + 1 libero
+    profiles = {}
+    for team, roster in teams.items():
+        liberos   = {p:d for p,d in roster.items() if d["position"]=="L"}
+        non_lib   = {p:d for p,d in roster.items() if d["position"]!="L"}
+        top7      = dict(sorted(non_lib.items(), key=lambda x:-x[1]["pis_rolling"])[:7])
+        top_lib   = dict(sorted(liberos.items(), key=lambda x:-x[1]["pis_rolling"])[:1])
+        final_roster = {**top7, **top_lib}
+        tis = sum(p["pis_rolling"]*p["role_weight"] for p in final_roster.values())
+        profiles[team] = {"tis_typical": round(tis,2), "roster": final_roster}
+
+    print(f"  {liga}: {len(profiles)} drużyn")
+    return profiles
 
 # ── FORM CALCULATION ──────────────────────────────────────────
 
@@ -36,111 +136,29 @@ def calc_form(liga):
         last5 = results[-5:] if n>=5 else results
         wr5   = sum(last5)/len(last5)
         trend = (sum(results[-3:])/3 - sum(results[-5:-3])/2) if n>=5 else 0.0
-        form[team] = {"win_rate_last5":round(wr5,3), "form_trend":round(trend,3), "games_total":n}
+        form[team] = {"win_rate_last5":round(wr5,3),"form_trend":round(trend,3),"games_total":n}
     return form
-
-# ── RUN PIPELINE ──────────────────────────────────────────────
-
-def run_pipeline_liga(liga):
-    """Uruchom run_pipeline_v3.py dla jednej ligi."""
-    input_dir  = f"data/{liga}"
-    output_dir = f"data/{liga}"
-
-    if not os.path.exists(f"{input_dir}/players_raw.csv"):
-        print(f"  {liga}: brak players_raw.csv — pomijam")
-        return None
-
-    matches_path = f"{input_dir}/matches_with_odds.csv"
-    if not os.path.exists(matches_path):
-        matches_path = f"{input_dir}/matches.csv"
-    result = subprocess.run(
-        [sys.executable, "scripts/run_pipeline_v3.py",
-         "--input", input_dir, "--output", output_dir,
-         "--matches", matches_path],
-        capture_output=True, text=True, timeout=120
-    )
-
-    if result.returncode != 0:
-        print(f"  {liga}: pipeline ERROR\n{result.stderr[-300:]}")
-        return None
-
-    # Wczytaj pipeline_output.csv → zbuduj uproszczony profil
-    output_path = f"{output_dir}/pipeline_output.csv"
-    if not os.path.exists(output_path):
-        print(f"  {liga}: brak pipeline_output.csv")
-        return None
-
-    rows = list(csv.DictReader(open(output_path, encoding="utf-8-sig")))
-    print(f"  {liga}: {len(rows)} wierszy w pipeline_output")
-    return rows
-
-# ── BUILD PROFILES FROM PIPELINE OUTPUT ──────────────────────
-
-def build_profiles_from_output(liga, rows):
-    """Zbuduj team profiles ze szczegółów pipeline."""
-    teams = {}
-    for row in rows:
-        team = row.get("team_name","").strip()
-        if not team: continue
-        if team not in teams:
-            teams[team] = {"tis_typical": 0, "roster": {}}
-        # Dodaj zawodnika do rosteru
-        player = row.get("player_name","").strip()
-        if player:
-            try:
-                pis = float(row.get("pis_rolling", row.get("pis", 0)) or 0)
-            except: pis = 0
-            pos = row.get("position","UNKNOWN")
-            try: num = int(float(row.get("player_no",0)))
-            except: num = None
-            teams[team]["roster"][player] = {
-                "number":      num,
-                "position":    pos,
-                "pis_rolling": round(pis, 2),
-                "role_weight": ROLE_WEIGHTS.get(pos, 1.0),
-                "games_played": int(float(row.get("games_played", row.get("games",0)) or 0)),
-                "start_rate":  round(float(row.get("start_rate",0) or 0), 3),
-            }
-
-    # Oblicz TIS per drużyna
-    for team, data in teams.items():
-        tis = sum(p["pis_rolling"] * p["role_weight"] for p in data["roster"].values())
-        data["tis_typical"] = round(tis, 2)
-
-    return teams
 
 # ── MAIN ──────────────────────────────────────────────────────
 
-print("=== BetEdge CI Pipeline ===")
+print("=== BetEdge CI Pipeline (standalone) ===")
 os.makedirs("data/predictions", exist_ok=True)
 
 all_profiles = {}
 
 for liga in LEAGUES:
     print(f"\n[{liga.upper()}]")
-    rows = run_pipeline_liga(liga)
+    profiles = build_profiles_from_csv(liga)
 
-    if rows:
-        profiles = build_profiles_from_output(liga, rows)
-    else:
-        # Fallback: wczytaj stary team_profiles.json jeśli istnieje
-        old_path = "data/predictions/team_profiles.json"
-        if os.path.exists(old_path):
-            old = json.load(open(old_path))
-            profiles = old.get(liga, {})
-            print(f"  {liga}: używam starego profilu (fallback)")
-        else:
-            profiles = {}
-
-    # Dodaj formę
+    # Forma
     form_data = calc_form(liga)
     matched = 0
     for team in profiles:
         fd = form_data.get(team)
         if not fd:
-            for fn, fv in form_data.items():
+            for fn,fv in form_data.items():
                 if fn.lower() in team.lower() or team.lower() in fn.lower():
-                    fd = fv; break
+                    fd=fv; break
         if fd:
             profiles[team]["win_rate_last5"] = fd["win_rate_last5"]
             profiles[team]["form_trend"]     = fd["form_trend"]
@@ -151,13 +169,12 @@ for liga in LEAGUES:
             profiles[team].setdefault("form_trend", 0.0)
             profiles[team].setdefault("games_total", 0)
 
+    print(f"  forma: {matched}/{len(profiles)}")
     all_profiles[liga] = profiles
-    print(f"  {liga}: {len(profiles)} drużyn, forma {matched}/{len(profiles)}")
 
-# Zapisz
-with open("data/predictions/team_profiles.json", "w", encoding="utf-8") as f:
+with open("data/predictions/team_profiles.json","w",encoding="utf-8") as f:
     json.dump(all_profiles, f, indent=2, ensure_ascii=False)
 
-size = os.path.getsize("data/predictions/team_profiles.json")
 total = sum(len(v) for v in all_profiles.values())
+size  = os.path.getsize("data/predictions/team_profiles.json")
 print(f"\n✓ team_profiles.json: {total} drużyn, {size} bytes")
