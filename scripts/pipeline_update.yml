@@ -1,0 +1,54 @@
+name: BetEdge Pipeline Update
+
+on:
+  schedule:
+    # Co 2 dni o 7:00 UTC (9:00 PL) — playoffy
+    - cron: '0 7 */2 * *'
+  workflow_dispatch:  # Manual trigger z GitHub UI
+
+env:
+  SERVER: https://betsedge.pl
+  TOKEN: ${{ secrets.BETEDGE_TOKEN }}
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests pyyaml pandas
+
+      - name: Download data from server
+        run: python scripts/ci_download.py
+        env:
+          SERVER: ${{ env.SERVER }}
+          TOKEN: ${{ env.TOKEN }}
+
+      - name: Run pipeline per league
+        run: python scripts/ci_run_all.py
+        env:
+          SERVER: ${{ env.SERVER }}
+          TOKEN: ${{ env.TOKEN }}
+
+      - name: Upload results
+        run: python scripts/ci_upload.py
+        env:
+          SERVER: ${{ env.SERVER }}
+          TOKEN: ${{ env.TOKEN }}
+
+      - name: Upload artifacts (debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-${{ github.run_number }}
+          path: data/predictions/team_profiles.json
+          retention-days: 7
