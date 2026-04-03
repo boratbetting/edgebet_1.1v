@@ -81,7 +81,10 @@ def build_profiles_from_csv(liga):
         rec   = stats["rec_pos"]  / games
         pts   = stats["total_pts"]/ games
 
-        pos = infer_position(att, blk, srv, rec, pts)
+        # Lookup oficjalnej pozycji, fallback heurystyka
+        liga_key = liga if 'liga' in dir() else ''
+        pos_official = get_position(liga_key, team, player) if liga_key else None
+        pos = pos_official if pos_official else infer_position_v2(att, blk, srv, rec, pts, is_lib)
         pis = compute_pis(att, srv, blk, aerr, serr, rec)
 
         try: num = int(float(player_number[(team,player)]))
@@ -142,8 +145,21 @@ def calc_form(liga):
 
 # ── LAST LINEUP ───────────────────────────────────────────────
 
-def calc_last_lineup(players_raw_rows):
-    """Per drużyna: znajdź ostatni mecz i zwróć skład + stats."""
+def calc_last_lineup(players_raw_rows, matches_rows=None):
+    """Per drużyna: znajdź ostatni mecz i zwróć skład + stats + opponent."""
+    # Zbuduj słownik mid → opponent
+    mid_opponent = {}
+    mid_date = {}
+    if matches_rows:
+        for m in matches_rows:
+            mid = m.get("match_id","").strip()
+            home = m.get("home_team","").strip()
+            away = m.get("away_team","").strip()
+            dt   = m.get("match_datetime","").strip()
+            if mid:
+                mid_opponent[mid] = {"home": home, "away": away}
+                mid_date[mid] = dt
+
     team_matches = defaultdict(lambda: defaultdict(list))
     for row in players_raw_rows:
         team = row.get("team_name","").strip()
@@ -210,9 +226,21 @@ def calc_last_lineup(players_raw_rows):
         tis_match = sum(
             s["pis_match"] * ROLE_W.get(s["position"],1.0) for s in starters)
 
+        # Znajdź przeciwnika
+        opponent = ""
+        if last_mid in mid_opponent:
+            opp_data = mid_opponent[last_mid]
+            if opp_data["home"] == team:
+                opponent = opp_data["away"]
+            else:
+                opponent = opp_data["home"]
+        if last_mid in mid_date and not match_date:
+            match_date = mid_date[last_mid]
+
         result[team] = {
             "match_id":   last_mid,
             "match_date": match_date,
+            "opponent":   opponent,
             "starters":   starters,
             "tis_match":  round(tis_match, 1),
             "n_starters": len(starters),
@@ -223,6 +251,7 @@ def calc_last_lineup(players_raw_rows):
 
 print("=== BetEdge CI Pipeline (standalone) ===")
 os.makedirs("data/predictions", exist_ok=True)
+load_position_map()
 
 all_profiles = {}
 
