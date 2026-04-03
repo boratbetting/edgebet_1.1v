@@ -13,6 +13,65 @@ LEAGUES = ["fr_laf_w","fr_lam","de_bl_w","de_bl_m",
 
 ROLE_WEIGHTS = {"S":1.25,"OPP":1.20,"OH":1.10,"MB":1.00,"L":0.90,"UNKNOWN":1.00}
 
+# ── POSITION MAP LOOKUP ───────────────────────────────────────
+
+_position_map = {}
+
+def load_position_map():
+    global _position_map
+    try:
+        token = TOKEN or "aGhxmskexPrJxV1sWOfzLLNRqKKa9XFlNaZxzsutEWk"
+        r = requests.get(f"{SERVER}/download.php?liga=predictions&file=position_map.json",
+                         headers={"X-Auth-Token": token}, timeout=20)
+        if r.status_code == 200:
+            _position_map = r.json()
+            total = sum(len(t.get("players",{})) for lg in _position_map.values() for t in lg.values())
+            print(f"  position_map loaded: {total} zawodników")
+        else:
+            _position_map = {}
+            print(f"  position_map not available ({r.status_code}) — using heuristics")
+    except Exception as e:
+        _position_map = {}
+        print(f"  position_map error: {e} — using heuristics")
+
+def get_position(liga, team_name, player_name):
+    if not _position_map: return None
+    import unicodedata
+    def norm(s):
+        return unicodedata.normalize("NFD", (s or "").lower()).encode("ascii","ignore").decode().strip()
+    liga_data = _position_map.get((liga or "").lower(), {})
+    if not liga_data: return None
+    team_data = liga_data.get(team_name)
+    if not team_data:
+        tn = norm(team_name)
+        for k, v in liga_data.items():
+            kn = norm(k)
+            if kn in tn or tn in kn or (kn.split() and kn.split()[0] in tn):
+                team_data = v; break
+    if not team_data or "players" not in team_data: return None
+    pn = norm(player_name)
+    for name, data in team_data["players"].items():
+        nn = norm(name)
+        if nn == pn: return data["position"]
+        parts_a, parts_b = pn.split(), nn.split()
+        if parts_a and parts_b and parts_a[-1] == parts_b[-1] and len(parts_a[-1]) > 2:
+            return data["position"]
+        if nn in pn or pn in nn: return data["position"]
+    return None
+
+def infer_position_v2(att, blk, srv, rec, pts, is_lib=False):
+    """Ulepszona heurystyka — fallback gdy brak position_map."""
+    if is_lib: return "L"
+    if pts < 0.5 and att < 0.5 and rec > 3.0: return "L"
+    if att < 1.5 and pts < 3.0 and blk < 0.5: return "S"
+    if blk >= 1.0 and rec < 1.5: return "MB"
+    if att >= 5.0 and rec < 2.0: return "OPP"
+    if att >= 2.0 and rec >= 2.0: return "OH"
+    if att >= 4.0: return "OPP"
+    if blk >= 0.8: return "MB"
+    if att >= 1.5: return "OH"
+    return "UNKNOWN"
+
 # ── POSITION INFERENCE ────────────────────────────────────────
 
 def infer_position(att, blk, srv, rec, pts):
@@ -81,9 +140,8 @@ def build_profiles_from_csv(liga):
         rec   = stats["rec_pos"]  / games
         pts   = stats["total_pts"]/ games
 
-        # Lookup oficjalnej pozycji, fallback heurystyka
-        liga_key = liga if 'liga' in dir() else ''
-        pos_official = get_position(liga_key, team, player) if liga_key else None
+        # Lookup oficjalnej pozycji (z position_map), fallback heurystyka
+        pos_official = get_position(liga, team, player)
         pos = pos_official if pos_official else infer_position_v2(att, blk, srv, rec, pts, is_lib)
         pis = compute_pis(att, srv, blk, aerr, serr, rec)
 
