@@ -139,6 +139,86 @@ def calc_form(liga):
         form[team] = {"win_rate_last5":round(wr5,3),"form_trend":round(trend,3),"games_total":n}
     return form
 
+
+# ── LAST LINEUP ───────────────────────────────────────────────
+
+def calc_last_lineup(players_raw_rows):
+    """Per drużyna: znajdź ostatni mecz i zwróć skład + stats."""
+    team_matches = defaultdict(lambda: defaultdict(list))
+    for row in players_raw_rows:
+        team = row.get("team_name","").strip()
+        mid  = row.get("match_id","").strip()
+        if team and mid:
+            team_matches[team][mid].append(row)
+
+    result = {}
+    ROLE_W = {"S":1.25,"OPP":1.20,"OH":1.10,"MB":1.00,"L":0.90,"UNKNOWN":1.0}
+
+    for team, matches in team_matches.items():
+        if not matches: continue
+        sorted_mids = sorted(matches.keys(), key=lambda x: int(x) if x.isdigit() else 0)
+        last_mid = sorted_mids[-1]
+        last_players = matches[last_mid]
+
+        match_date = last_players[0].get("match_datetime","") if last_players else ""
+
+        starters = []
+        for p in last_players:
+            name   = p.get("player_name","").strip()
+            number = p.get("player_no","")
+            is_lib = str(p.get("libero","")).strip().upper() == "L"
+            try: s1 = int(float(p.get("set1",0) or 0))
+            except: s1 = 0
+            if s1 == 0 and not is_lib: continue
+
+            def _f(k): 
+                try: return float(p.get(k,0) or 0)
+                except: return 0.0
+
+            pis_match = round(
+                _f("att_pts")*1.0 + _f("blocks")*1.3 +
+                _f("srv_ace")*1.2 + _f("srv_err")*(-0.8) + _f("att_err")*(-0.8), 2)
+
+            pos = p.get("position","UNKNOWN")
+            starters.append({
+                "name":     name,
+                "number":   int(number) if str(number).isdigit() else 0,
+                "position": pos,
+                "pis_match": pis_match,
+                "pts":      int(_f("total_pts")),
+                "srv_ace":  int(_f("srv_ace")),
+                "att_pts":  int(_f("att_pts")),
+                "blocks":   int(_f("blocks")),
+                "libero":   is_lib,
+                "start_rate_last3": 0.0,
+            })
+
+        # start_rate_last3
+        last_3 = sorted_mids[-3:] if len(sorted_mids) >= 3 else sorted_mids
+        for s in starters:
+            cnt = 0
+            for mid in last_3:
+                for pp in matches[mid]:
+                    if pp.get("player_name","").strip() == s["name"]:
+                        try: s1_v = int(float(pp.get("set1",0) or 0))
+                        except: s1_v = 0
+                        is_l = str(pp.get("libero","")).strip().upper() == "L"
+                        if s1_v > 0 or is_l:
+                            cnt += 1
+            s["start_rate_last3"] = round(cnt / len(last_3), 2)
+
+        tis_match = sum(
+            s["pis_match"] * ROLE_W.get(s["position"],1.0) for s in starters)
+
+        result[team] = {
+            "match_id":   last_mid,
+            "match_date": match_date,
+            "starters":   starters,
+            "tis_match":  round(tis_match, 1),
+            "n_starters": len(starters),
+        }
+    return result
+
 # ── MAIN ──────────────────────────────────────────────────────
 
 print("=== BetEdge CI Pipeline (standalone) ===")
